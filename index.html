@@ -71,7 +71,15 @@
         <option value="1">m</option>
         <option value="0.0254">inches</option>
       </select>
-      <label style="width:auto"><input id="zup" type="checkbox"> Z-up</label>
+      <label for="up" style="width:auto">Bottom face is</label>
+      <select id="up" style="padding:.5rem;border-radius:8px;background:#222a32;color:inherit;border:1px solid var(--line)">
+        <option value="+Y" selected>-Y (Y is up)</option>
+        <option value="+Z">-Z (Z is up)</option>
+        <option value="-Y">+Y (upside down)</option>
+        <option value="-Z">+Z</option>
+        <option value="+X">-X</option>
+        <option value="-X">+X</option>
+      </select>
     </div>
 
     <div class="row ar-only">
@@ -96,7 +104,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-const DEFAULT_MODEL = 'models/model.fbx';       // <- the file you replace
+const DEFAULT_MODEL = 'models/model.glb';       // <- the file you replace
 let modelUrl = params.get('model') || DEFAULT_MODEL;  // or ?model=models/other.glb
 let isBlob = false;
 $('modelName').textContent = modelUrl;
@@ -149,8 +157,10 @@ function show(obj) {
   const native = modelExt === 'glb' || modelExt === 'gltf';
   if (!native) {
     obj.scale.setScalar(parseFloat($('units').value));
-    if ($('zup').checked) wrap.rotation.x = -Math.PI / 2;
   }
+  // rotate so the chosen "up" axis points up
+  const R = { '+Y':[0,0], '+Z':[-Math.PI/2,0], '-Z':[Math.PI/2,0], '-Y':[Math.PI,0], '+X':[0,Math.PI/2], '-X':[0,-Math.PI/2] }[$('up').value];
+  wrap.rotation.set(R[0], 0, R[1]);
   wrap.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(wrap);
   const c = box.getCenter(new THREE.Vector3());
@@ -177,7 +187,7 @@ function loadModel() {
   } else fail('Unsupported file type: .' + modelExt);
 }
 $('units').addEventListener('change', loadModel);
-$('zup').addEventListener('change', loadModel);
+$('up').addEventListener('change', loadModel);
 
 // ---------- scale / rotate ----------
 let userScale = 1, userYaw = 0;
