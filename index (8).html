@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AR Model Preview</title>
+<style>
+  :root { --ink:#15191e; --panel:rgba(21,25,30,.88); --line:#3a424c; --text:#eef1f4; --dim:#9aa5b1; --accent:#ffb020; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body { background:var(--ink); color:var(--text); font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  #overlay { position:fixed; inset:0; display:flex; flex-direction:column; justify-content:flex-end; pointer-events:none; }
+  #intro { pointer-events:auto; margin:auto; max-width:30rem; padding:1.5rem; }
+  #intro h1 { font-size:1.6rem; margin:0 0 .5rem; letter-spacing:-.01em; }
+  #intro p { color:var(--dim); margin:.25rem 0; }
+  body.in-ar #intro { display:none; }
+  #panel { pointer-events:auto; background:var(--panel); border-top:1px solid var(--line); padding:.75rem .9rem calc(.75rem + env(safe-area-inset-bottom,0px)); display:flex; flex-direction:column; gap:.6rem; }
+  body.in-ar #panel { border-radius:14px 14px 0 0; }
+  #status { color:var(--accent); font-weight:600; min-height:1.3em; }
+  #dims { color:var(--dim); font-size:.85rem; }
+  .row { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+  .row label { width:4.2rem; color:var(--dim); font-size:.85rem; }
+  .row output { width:4rem; text-align:right; font-variant-numeric:tabular-nums; font-size:.85rem; }
+  input[type=range] { flex:1; min-width:6rem; accent-color:var(--accent); height:2rem; }
+  button, .btn { appearance:none; border:1px solid var(--line); background:#222a32; color:var(--text); border-radius:8px; padding:.6rem .9rem; font:inherit; font-weight:600; cursor:pointer; text-align:center; }
+  button:focus-visible,.btn:focus-visible,input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#1b1300; }
+  button.on { background:var(--accent); color:#1b1300; border-color:var(--accent); }
+  button:disabled { opacity:.45; cursor:default; }
+  .btn input { display:none; }
+  .grow { flex:1; }
+  .ar-only { display:none; }
+  body.in-ar .ar-only { display:flex; }
+  body.in-ar .pre-only { display:none; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="overlay">
+  <section id="intro">
+    <h1>AR model preview</h1>
+    <p id="support">Checking AR support…</p>
+    <p>Loads <code id="modelName">models/model.glb</code>. Swap the file in your repo, or pick a .glb from your phone below.</p>
+  </section>
+
+  <section id="panel">
+    <div id="status">Ready</div>
+    <div id="dims"></div>
+
+    <div class="row">
+      <label for="scale">Scale</label>
+      <input id="scale" type="range" min="-100" max="100" value="0">
+      <output id="scaleOut">1.00×</output>
+    </div>
+    <div class="row">
+      <label for="rot">Rotate</label>
+      <input id="rot" type="range" min="0" max="360" value="0">
+      <output id="rotOut">0°</output>
+    </div>
+
+    <div class="row" id="srcRow">
+      <label for="units" style="width:auto">Source units</label>
+      <select id="units" style="padding:.5rem;border-radius:8px;background:#222a32;color:inherit;border:1px solid var(--line)">
+        <option value="0.01" selected>cm (Fusion default)</option>
+        <option value="0.001">mm</option>
+        <option value="1">m</option>
+        <option value="0.0254">inches</option>
+      </select>
+      <label style="width:auto"><input id="zup" type="checkbox"> Z-up</label>
+    </div>
+
+    <div class="row ar-only">
+      <button id="move" class="grow" disabled>Move</button>
+      <button id="reset" class="grow">Reset placement</button>
+    </div>
+    <div class="row">
+      <label class="btn grow pre-only" for="file" style="width:auto">Choose .glb<input id="file" type="file" accept=".glb,.gltf,.fbx,.obj,.stl"></label>
+      <button id="reload" class="grow">Reload model</button>
+      <button id="start" class="primary grow pre-only" disabled>Start AR</button>
+      <button id="exit" class="grow ar-only">Exit AR</button>
+    </div>
+  </section>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const DEFAULT_MODEL = 'models/model.glb';       // <- the file you replace
+let modelUrl = params.get('model') || DEFAULT_MODEL;  // or ?model=models/other.glb
+let isBlob = false;
+$('modelName').textContent = modelUrl;
+
+// ---------- three.js setup ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local');
+renderer.domElement.style.cssText = 'position:fixed;inset:0;z-index:-1';
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 50);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x667788, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(1, 3, 2);
+scene.add(sun);
+
+// Reticle (shows where the surface is)
+const reticle = new THREE.Mesh(
+  new THREE.RingGeometry(0.07, 0.09, 40).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0xffb020 })
+);
+reticle.matrixAutoUpdate = false;
+reticle.visible = false;
+scene.add(reticle);
+
+// holder = world pose (from anchor / hit), pivot = user scale + rotation
+const holder = new THREE.Group();
+holder.matrixAutoUpdate = false;
+holder.visible = false;
+const pivot = new THREE.Group();
+holder.add(pivot);
+scene.add(holder);
+
+// ---------- model loading ----------
+const gltfLoader = new GLTFLoader();
+const loaders = { fbx: new FBXLoader(), obj: new OBJLoader(), stl: new STLLoader() };
+let model = null, modelExt = (modelUrl.split('?')[0].split('.').pop() || 'glb').toLowerCase();
+const modelSize = new THREE.Vector3(1, 1, 1);
+
+function setStatus(t) { $('status').textContent = t; }
+
+function show(obj) {
+  // glb/gltf are already in metres; FBX/OBJ/STL use the "source units" setting (Fusion exports cm)
+  const wrap = new THREE.Group();
+  wrap.add(obj);
+  const native = modelExt === 'glb' || modelExt === 'gltf';
+  if (!native) {
+    obj.scale.setScalar(parseFloat($('units').value));
+    if ($('zup').checked) wrap.rotation.x = -Math.PI / 2;
+  }
+  wrap.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(wrap);
+  const c = box.getCenter(new THREE.Vector3());
+  box.getSize(modelSize);
+  wrap.position.set(-c.x, -box.min.y, -c.z); // sit on the surface, centred
+  if (model) { pivot.remove(model); model.traverse(o => { o.geometry?.dispose(); }); }
+  model = wrap;
+  pivot.add(model);
+  updateDims();
+  setStatus(placed ? 'Model updated' : (inAR ? 'Point at a surface and tap to place' : 'Model loaded'));
+}
+
+function loadModel() {
+  const url = isBlob ? modelUrl : modelUrl + (modelUrl.includes('?') ? '&' : '?') + 't=' + Date.now(); // cache-bust
+  setStatus('Loading model…');
+  const fail = err => { console.error(err); setStatus('Could not load ' + modelUrl + ' — check the path/file name'); };
+  if (modelExt === 'glb' || modelExt === 'gltf') {
+    gltfLoader.load(url, g => show(g.scene), undefined, fail);
+  } else if (loaders[modelExt]) {
+    loaders[modelExt].load(url, r => {
+      if (modelExt === 'stl') r = new THREE.Mesh(r, new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: .6, metalness: .1 }));
+      show(r);
+    }, undefined, fail);
+  } else fail('Unsupported file type: .' + modelExt);
+}
+$('units').addEventListener('change', loadModel);
+$('zup').addEventListener('change', loadModel);
+
+// ---------- scale / rotate ----------
+let userScale = 1, userYaw = 0;
+function applyTransform() {
+  pivot.scale.setScalar(userScale);
+  pivot.rotation.y = userYaw;
+  updateDims();
+}
+function updateDims() {
+  const s = userScale * 100; // glTF units are metres -> cm
+  $('dims').textContent = model
+    ? `Size: ${(modelSize.x*s).toFixed(1)} × ${(modelSize.y*s).toFixed(1)} × ${(modelSize.z*s).toFixed(1)} cm (W × H × D)`
+    : '';
+}
+$('scale').addEventListener('input', e => {
+  userScale = Math.pow(10, e.target.value / 100);        // 0.1× … 10×
+  $('scaleOut').textContent = userScale.toFixed(2) + '×';
+  applyTransform();
+});
+$('rot').addEventListener('input', e => {
+  $('rotOut').textContent = e.target.value + '°';
+  userYaw = THREE.MathUtils.degToRad(e.target.value);
+  applyTransform();
+});
+
+// ---------- UI wiring ----------
+$('reload').addEventListener('click', loadModel);
+$('file').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  modelUrl = URL.createObjectURL(f); isBlob = true; modelExt = f.name.split('.').pop().toLowerCase();
+  $('modelName').textContent = f.name;
+  loadModel();
+});
+// stop taps on the UI from also placing the model in AR
+for (const el of [$('panel')]) el.addEventListener('beforexrselect', e => e.preventDefault());
+
+// ---------- AR session ----------
+let session = null, hitSource = null, inAR = false;
+let lastHit = null, anchor = null, placed = false, moveMode = false, pendingPlace = false;
+const fixedMatrix = new THREE.Matrix4();
+
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-ar').then(ok => {
+    $('support').textContent = ok ? 'AR is available on this device.' : 'AR is not supported in this browser. Use Chrome on an ARCore-capable Android phone.';
+    $('start').disabled = !ok;
+  });
+} else {
+  $('support').textContent = 'WebXR not available. Use Chrome on an ARCore-capable Android phone (HTTPS required).';
+}
+
+$('start').addEventListener('click', async () => {
+  try {
+    session = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['hit-test'],
+      optionalFeatures: ['dom-overlay', 'anchors'],
+      domOverlay: { root: $('overlay') }
+    });
+  } catch (e) { setStatus('Could not start AR: ' + e.message); return; }
+
+  await renderer.xr.setSession(session);
+  const viewer = await session.requestReferenceSpace('viewer');
+  hitSource = await session.requestHitTestSource({ space: viewer });
+  inAR = true; placed = false; moveMode = false;
+  document.body.classList.add('in-ar');
+  holder.visible = false;
+  setStatus('Point at a surface and tap to place');
+  $('move').disabled = true; $('move').classList.remove('on');
+
+  session.addEventListener('select', () => { if (!placed || moveMode) pendingPlace = true; });
+  session.addEventListener('end', () => {
+    inAR = false; hitSource = null; session = null; anchor = null; lastHit = null;
+    document.body.classList.remove('in-ar');
+    reticle.visible = false; holder.visible = false;
+    setStatus('Ready');
+  });
+});
+$('exit').addEventListener('click', () => session?.end());
+
+$('move').addEventListener('click', () => {
+  if (!placed) return;
+  moveMode = !moveMode;
+  $('move').classList.toggle('on', moveMode);
+  $('move').textContent = moveMode ? 'Tap to drop here' : 'Move';
+  setStatus(moveMode ? 'Aim at a new spot — tap to drop' : 'Placed');
+  if (moveMode) { anchor?.delete(); anchor = null; }
+});
+$('reset').addEventListener('click', () => {
+  anchor?.delete(); anchor = null; placed = false; moveMode = false;
+  holder.visible = false;
+  $('move').disabled = true; $('move').classList.remove('on'); $('move').textContent = 'Move';
+  setStatus('Point at a surface and tap to place');
+});
+
+async function place(hit, refSpace) {
+  const pose = hit.getPose(refSpace);
+  if (!pose) return;
+  fixedMatrix.fromArray(pose.transform.matrix);
+  anchor?.delete(); anchor = null;
+  placed = true; moveMode = false;
+  holder.visible = true;
+  $('move').disabled = false; $('move').classList.remove('on'); $('move').textContent = 'Move';
+  setStatus('Placed — locked to surface');
+  if (hit.createAnchor) {
+    try { anchor = await hit.createAnchor(); } catch (e) { console.warn('Anchor failed, using fixed pose', e); }
+  }
+}
+
+// ---------- render loop ----------
+renderer.setAnimationLoop((time, frame) => {
+  if (frame && hitSource) {
+    const refSpace = renderer.xr.getReferenceSpace();
+    const results = frame.getHitTestResults(hitSource);
+    lastHit = results.length ? results[0] : null;
+    const pose = lastHit?.getPose(refSpace);
+    reticle.visible = !!pose && (!placed || moveMode);
+    if (pose) reticle.matrix.fromArray(pose.transform.matrix);
+
+    if (pendingPlace) { pendingPlace = false; if (lastHit) place(lastHit, refSpace); }
+
+    if (placed) {
+      if (moveMode && pose) {
+        holder.matrix.fromArray(pose.transform.matrix);          // follows the reticle live
+      } else if (anchor) {
+        const ap = frame.getPose(anchor.anchorSpace, refSpace);   // tracked anchor keeps it stuck to the surface
+        if (ap) holder.matrix.fromArray(ap.transform.matrix);
+      } else {
+        holder.matrix.copy(fixedMatrix);
+      }
+    }
+  }
+  renderer.render(scene, camera);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+loadModel();
+</script>
+</body>
+</html>
