@@ -104,7 +104,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-const DEFAULT_MODEL = 'models/model.glb';       // <- the file you replace
+const DEFAULT_MODEL = 'models/model.fbx';       // <- the file you replace
 let modelUrl = params.get('model') || DEFAULT_MODEL;  // or ?model=models/other.glb
 let isBlob = false;
 $('modelName').textContent = modelUrl;
