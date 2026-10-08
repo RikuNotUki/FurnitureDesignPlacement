@@ -83,6 +83,9 @@
     </div>
 
     <div class="row ar-only">
+      <label style="width:auto"><input id="occ" type="checkbox" checked> Occlusion (real objects/people in front hide the model)</label>
+    </div>
+    <div class="row ar-only">
       <button id="move" class="grow" disabled>Move</button>
       <button id="reset" class="grow">Reset placement</button>
     </div>
@@ -104,7 +107,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-const DEFAULT_MODEL = 'models/model.fbx';       // <- the file you replace
+const DEFAULT_MODEL = 'models/model.glb';       // <- the file you replace
 let modelUrl = params.get('model') || DEFAULT_MODEL;  // or ?model=models/other.glb
 let isBlob = false;
 $('modelName').textContent = modelUrl;
@@ -142,6 +145,65 @@ const pivot = new THREE.Group();
 holder.add(pivot);
 scene.add(holder);
 
+// ---------- occlusion (depth sensing) ----------
+const occ = {
+  uDepth: { value: new THREE.DataTexture(new Uint8Array(2), 1, 1, THREE.RGFormat) },
+  uNormDepth: { value: new THREE.Matrix4() },
+  uVp: { value: new THREE.Vector4(0, 0, 1, 1) },
+  uScale: { value: 1 }, uFloat: { value: 0 }, uOn: { value: 0 }, uBias: { value: 0.05 }
+};
+occ.uDepth.value.needsUpdate = true;
+let depthTex = null;
+
+function patchOcclusion(root) {
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material)) {
+      m.onBeforeCompile = sh => {
+        Object.assign(sh.uniforms, occ);
+        sh.vertexShader = 'varying float vOccDepth;\n' + sh.vertexShader
+          .replace('#include <project_vertex>', '#include <project_vertex>\n vOccDepth = -mvPosition.z;');
+        sh.fragmentShader = `uniform sampler2D uDepth; uniform mat4 uNormDepth; uniform vec4 uVp;
+          uniform float uScale, uFloat, uOn, uBias; varying float vOccDepth;\n` + sh.fragmentShader.replace('void main() {', `void main() {
+          if (uOn > 0.5) {
+            vec2 nv = vec2((gl_FragCoord.x - uVp.x) / uVp.z, 1.0 - (gl_FragCoord.y - uVp.y) / uVp.w);
+            vec2 duv = (uNormDepth * vec4(nv, 0.0, 1.0)).xy;
+            vec2 t = texture2D(uDepth, duv).rg;
+            float raw = uFloat > 0.5 ? t.r : (t.r + t.g * 256.0) * 255.0;
+            float real = raw * uScale;
+            if (real > 0.0 && real < vOccDepth - uBias) discard;
+          }`);
+      };
+      m.needsUpdate = true;
+    }
+  });
+}
+
+function updateDepth(frame, refSpace) {
+  occ.uOn.value = 0;
+  if (!session?.depthUsage || !$('occ').checked) return;
+  const view = frame.getViewerPose(refSpace)?.views[0];
+  const d = view && frame.getDepthInformation(view);
+  const cam = renderer.xr.getCamera().cameras[0];
+  if (!d || !cam) return;
+  const isFloat = session.depthDataFormat === 'float32';
+  if (!depthTex || depthTex.image.width !== d.width || depthTex.image.height !== d.height) {
+    depthTex = isFloat
+      ? new THREE.DataTexture(new Float32Array(d.width * d.height), d.width, d.height, THREE.RedFormat, THREE.FloatType)
+      : new THREE.DataTexture(new Uint8Array(d.width * d.height * 2), d.width, d.height, THREE.RGFormat, THREE.UnsignedByteType);
+    depthTex.minFilter = depthTex.magFilter = THREE.NearestFilter;
+    depthTex.unpackAlignment = 1;
+    occ.uDepth.value = depthTex;
+  }
+  depthTex.image.data = isFloat ? new Float32Array(d.data) : new Uint8Array(d.data);
+  depthTex.needsUpdate = true;
+  occ.uNormDepth.value.fromArray(d.normDepthBufferFromNormView.matrix);
+  occ.uVp.value.copy(cam.viewport);
+  occ.uScale.value = d.rawValueToMeters;
+  occ.uFloat.value = isFloat ? 1 : 0;
+  occ.uOn.value = 1;
+}
+
 // ---------- model loading ----------
 const gltfLoader = new GLTFLoader();
 const loaders = { fbx: new FBXLoader(), obj: new OBJLoader(), stl: new STLLoader() };
@@ -168,6 +230,7 @@ function show(obj) {
   wrap.position.set(-c.x, -box.min.y, -c.z); // sit on the surface, centred
   if (model) { pivot.remove(model); model.traverse(o => { o.geometry?.dispose(); }); }
   model = wrap;
+  patchOcclusion(model);
   pivot.add(model);
   updateDims();
   setStatus(placed ? 'Model updated' : (inAR ? 'Point at a surface and tap to place' : 'Model loaded'));
@@ -243,7 +306,8 @@ $('start').addEventListener('click', async () => {
   try {
     session = await navigator.xr.requestSession('immersive-ar', {
       requiredFeatures: ['hit-test'],
-      optionalFeatures: ['dom-overlay', 'anchors'],
+      optionalFeatures: ['dom-overlay', 'anchors', 'depth-sensing'],
+      depthSensing: { usagePreference: ['cpu-optimized'], dataFormatPreference: ['luminance-alpha', 'float32'] },
       domOverlay: { root: $('overlay') }
     });
   } catch (e) { setStatus('Could not start AR: ' + e.message); return; }
@@ -253,6 +317,8 @@ $('start').addEventListener('click', async () => {
   hitSource = await session.requestHitTestSource({ space: viewer });
   inAR = true; placed = false; moveMode = false;
   document.body.classList.add('in-ar');
+  $('occ').disabled = !session.depthUsage;
+  if (!session.depthUsage) $('occ').checked = false;
   holder.visible = false;
   setStatus('Point at a surface and tap to place');
   $('move').disabled = true; $('move').classList.remove('on');
@@ -305,6 +371,8 @@ renderer.setAnimationLoop((time, frame) => {
     const pose = lastHit?.getPose(refSpace);
     reticle.visible = !!pose && (!placed || moveMode);
     if (pose) reticle.matrix.fromArray(pose.transform.matrix);
+
+    updateDepth(frame, refSpace);
 
     if (pendingPlace) { pendingPlace = false; if (lastHit) place(lastHit, refSpace); }
 
